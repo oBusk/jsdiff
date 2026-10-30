@@ -92,7 +92,6 @@ export default class Diff<
     };
 
     const newLen = newTokens.length, oldLen = oldTokens.length;
-    let editLength = 1;
     let maxEditLength = newLen + oldLen;
     if(options.maxEditLength != null) {
       maxEditLength = Math.min(maxEditLength, options.maxEditLength);
@@ -110,9 +109,8 @@ export default class Diff<
 
     // bestPath[offset + k] holds the furthest-reaching path on diagonal k = oldPos - newPos.
     // Positions range over -1 <= oldPos < oldLen and -1 <= newPos < newLen, so the edit graph has
-    // the oldLen + newLen + 1 diagonals -newLen..oldLen, and the loop below never leaves them: a
-    // path that reaches an edge of the graph stops the exploration beyond it (see
-    // minDiagonalToConsider and maxDiagonalToConsider). The loop also reads k - 1 and k + 1, hence
+    // the oldLen + newLen + 1 diagonals -newLen..oldLen, and the loop below never leaves them (see
+    // the comment on finalDiagonal). The loop also reads k - 1 and k + 1, hence
     // one spare slot on each side. Diagonals go negative, and JavaScript engines store negative
     // array indices as ordinary named properties rather than as array elements, which would make
     // every lookup in the loop a slow dictionary access; the offset keeps every index within
@@ -121,52 +119,63 @@ export default class Diff<
     const bestPath: Path[] = new Array(oldLen + newLen + 3);
     bestPath[offset] = initialPath;
 
-    // Once we hit the right edge of the edit graph on some diagonal k, we can
-    // definitely reach the end of the edit graph in no more than k edits, so
-    // there's no point in considering any moves to diagonal k+1 any more (from
-    // which we're guaranteed to need at least k+1 more edits).
-    // Similarly, once we've reached the bottom of the edit graph, there's no
-    // point considering moves to lower diagonals.
-    // We record this fact by setting minDiagonalToConsider and
-    // maxDiagonalToConsider to some finite value once we've hit the edge of
-    // the edit graph.
-    // This optimization is not faithful to the original algorithm presented in
-    // Myers's paper, which instead pointlessly extends D-paths off the end of
-    // the edit graph - see page 7 of Myers's paper which notes this point
-    // explicitly and illustrates it with a diagram. This has major performance
-    // implications for some common scenarios. For instance, to compute a diff
-    // where the new text simply appends d characters on the end of the
-    // original text of length n, the true Myers algorithm will take O(n+d^2)
-    // time while this optimization needs only O(n+d) time.
-    let minDiagonalToConsider = -Infinity, maxDiagonalToConsider = Infinity;
+    // Every path ends on diagonal finalDiagonal, and each edit moves a path to a neighbouring
+    // diagonal. So a path with d edits on diagonal k needs at least |finalDiagonal - k| more edits
+    // to reach the end, and can only be part of a result with editLength edits if
+    // d + |finalDiagonal - k| <= editLength.
+    // Myers's algorithm computes the furthest-reaching path with d edits on every diagonal for
+    // d = 1, 2, 3, ... until one of them reaches the end, including many paths that this rules
+    // out. Like "An O(NP) Sequence Comparison Algorithm" by Wu, Manber, Myers and Miller, we
+    // instead try each possible editLength in turn, and compute only the paths that could be part
+    // of a result with that many edits: on each diagonal k that a path can reach and still finish
+    // within editLength edits (those with |k| + |finalDiagonal - k| <= editLength, which run from
+    // (finalDiagonal - editLength) / 2 to (finalDiagonal + editLength) / 2), the path with
+    // editLength - |finalDiagonal - k| edits. Each is built from the paths with one edit fewer on
+    // diagonals k - 1 and k + 1, exactly as in Myers's algorithm, so the result is the same; we
+    // just skip the paths that can't be part of it.
+    // This takes O((N+M)P) time rather than O((N+M)D), where P is the number of insertions or of
+    // deletions in the result, whichever is smaller. So diffs that mostly insert or mostly delete,
+    // such as inserting a big block of text, are fast.
+    // The range of diagonals stays within those of the edit graph, since editLength never exceeds
+    // oldLen + newLen.
+    const finalDiagonal = oldLen - newLen;
 
-    // The seed path may already sit on an edge of the graph (one text empty, or a prefix of the
-    // other). Apply the same rule as the loop below; otherwise the first iteration would read one
-    // slot before the start of bestPath when the new text is empty.
-    if (initialPath.oldPos + 1 >= oldLen) {
-      maxDiagonalToConsider = -1;
-    }
-    if (newPos + 1 >= newLen) {
-      minDiagonalToConsider = 1;
-    }
+    // Every path to the end has at least |finalDiagonal| edits, and an edit count of the same
+    // parity, so we try every second editLength from there.
+    const minEditLength = Math.abs(finalDiagonal);
+    let editLength = minEditLength;
 
     // Main worker method. checks all permutations of a given edit length for acceptance.
     const execEditLength = () => {
+      let lowestDiagonal = (finalDiagonal - editLength) / 2,
+          highestDiagonal = (finalDiagonal + editLength) / 2;
+      if (editLength === minEditLength) {
+        // Diagonal 0, at one end of the range, holds the path we started from
+        if (finalDiagonal >= 0) {
+          lowestDiagonal++;
+        } else {
+          highestDiagonal--;
+        }
+      }
+
+      // Each path is built from one on the neighbouring diagonal further from finalDiagonal,
+      // computed earlier for this editLength, and one on the neighbouring diagonal closer to it,
+      // computed for the previous editLength. So we work our way in from both ends of the range:
+      // up from lowestDiagonal, then down from highestDiagonal to finalDiagonal.
+      const diagonalsBelowFinal = finalDiagonal - lowestDiagonal;
       // k here represents the number of a diagonal in the edit graph
       // (The variable name k is chosen to match the Myers diff paper)
-      for (
-        let k = Math.max(minDiagonalToConsider, -editLength);
-        k <= Math.min(maxDiagonalToConsider, editLength);
-        k += 2
-      ) {
+      for (let i = 0; i <= highestDiagonal - lowestDiagonal; i++) {
+        let k;
+        if (i < diagonalsBelowFinal) {
+          k = lowestDiagonal + i;
+        } else {
+          k = highestDiagonal - (i - diagonalsBelowFinal);
+        }
+
         let basePath;
         const removePath = bestPath[offset + k - 1],
               addPath = bestPath[offset + k + 1];
-        if (removePath) {
-          // No one else is going to attempt to use this value, clear it
-          // @ts-expect-error - perf optimisation. This type-violating value will never be read.
-          bestPath[offset + k - 1] = undefined;
-        }
 
         const canAdd = addPath && addPath.oldPos - k < newLen;
         const canRemove = removePath && removePath.oldPos + 1 < oldLen;
@@ -193,16 +202,10 @@ export default class Diff<
           return done(this.buildValues(basePath.lastComponent, newTokens, oldTokens)) || true;
         } else {
           bestPath[offset + k] = basePath;
-          if (basePath.oldPos + 1 >= oldLen) {
-            maxDiagonalToConsider = Math.min(maxDiagonalToConsider, k - 1);
-          }
-          if (newPos + 1 >= newLen) {
-            minDiagonalToConsider = Math.max(minDiagonalToConsider, k + 1);
-          }
         }
       }
 
-      editLength++;
+      editLength += 2;
     };
 
     // Performs the length of edit iteration. Is a bit fugly as this has to support the
