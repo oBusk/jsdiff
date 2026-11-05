@@ -22,6 +22,21 @@ interface Path {
   lastComponent: DraftChangeObject | undefined
 }
 
+// 32-bit FNV-1a over the UTF-16 code units, followed by MurmurHash3's finalizer so that the low
+// bits, which pick the hash table slot, depend on every character.
+function hashString(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h = Math.imul(h ^ s.charCodeAt(i), 0x01000193);
+  }
+  h ^= h >>> 16;
+  h = Math.imul(h, 0x85ebca6b);
+  h ^= h >>> 13;
+  h = Math.imul(h, 0xc2b2ae35);
+  h ^= h >>> 16;
+  return h;
+}
+
 export default class Diff<
   TokenT,
   ValueT extends Iterable<TokenT> = Iterable<TokenT>,
@@ -110,18 +125,55 @@ export default class Diff<
       // normalized strings can be garbage collected before it starts, rather than being kept
       // alive for the whole diff. A custom comparator or equals() could implement any notion of
       // equality, so in those cases we have to keep passing the normalized tokens themselves.
-      const ids = new Map<TokenT, number>();
+      //
+      // String tokens go in a hash table of our own rather than a Map, because V8 internalizes
+      // strings used as Map keys: for a token that is a slice of the input, that allocates a full
+      // copy that stays alive, through the token, for the rest of the diff. Here we hash the
+      // characters ourselves and only compare strings with ===, which copies nothing. The table
+      // is at most half full, so probe sequences stay short.
+      let capacity = 16;
+      while (capacity < (oldLen + newLen) * 2) {
+        capacity *= 2;
+      }
+      const mask = capacity - 1,
+            slotIds = new Int32Array(capacity), // ID + 1, so that 0 marks an empty slot
+            slotHashes = new Int32Array(capacity),
+            slotTokens: string[] = new Array(capacity);
+      // Other tokens (only possible in diffArrays) are compared by identity, which a Map does
+      // without copying anything.
+      const otherIds = new Map<TokenT, number>();
       let nextId = 0;
       const toIds = (tokens: TokenT[]) => {
         const out = new Int32Array(tokens.length);
         for (let i = 0; i < tokens.length; i++) {
           const token = this.normalizeToken(tokens[i], options);
-          let id = ids.get(token);
-          if (id === undefined) {
-            id = nextId++;
-            // A Map treats NaN as equal to itself, but === doesn't, so each NaN gets its own ID.
-            if (!Number.isNaN(token)) {
-              ids.set(token, id);
+          let id;
+          if (typeof token === 'string') {
+            const hash = hashString(token);
+            let slot = hash & mask;
+            for (;;) {
+              const slotId = slotIds[slot];
+              if (slotId === 0) {
+                id = nextId++;
+                slotIds[slot] = id + 1;
+                slotHashes[slot] = hash;
+                slotTokens[slot] = token;
+                break;
+              }
+              if (slotHashes[slot] === hash && slotTokens[slot] === token) {
+                id = slotId - 1;
+                break;
+              }
+              slot = (slot + 1) & mask;
+            }
+          } else {
+            id = otherIds.get(token);
+            if (id === undefined) {
+              id = nextId++;
+              // A Map treats NaN as equal to itself, but === doesn't, so each NaN gets its own ID.
+              if (!Number.isNaN(token)) {
+                otherIds.set(token, id);
+              }
             }
           }
           out[i] = id;

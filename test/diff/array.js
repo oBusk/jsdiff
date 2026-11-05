@@ -41,6 +41,15 @@ describe('diff/array', function() {
         {count: 1, value: [2], removed: false, added: false}
       ]);
     });
+    it('should not treat different strings with the same internal hash as equal', function() {
+      // These two strings collide in the hash used to intern string tokens.
+      expect(diffArrays(['a', 'line890499', 'b'], ['a', 'line1450412', 'b'])).to.deep.equals([
+        {count: 1, value: ['a'], removed: false, added: false},
+        {count: 1, value: ['line890499'], removed: true, added: false},
+        {count: 1, value: ['line1450412'], removed: false, added: true},
+        {count: 1, value: ['b'], removed: false, added: false}
+      ]);
+    });
     it('should call an equals() overridden by a subclass with the tokens', function() {
       class ByIdDiff extends Diff {
         equals(left, right) {
