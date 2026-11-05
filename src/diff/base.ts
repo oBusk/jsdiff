@@ -102,8 +102,40 @@ export default class Diff<
 
     // Tokens are compared in normalized form, but the returned change objects are built from the
     // original tokens.
-    const oldNormalized = oldTokens.map(token => this.normalizeToken(token, options)),
-          newNormalized = newTokens.map(token => this.normalizeToken(token, options));
+    let oldNormalized: TokenT[], newNormalized: TokenT[];
+    if (!options.comparator && this.equals === Diff.prototype.equals) {
+      // With the default equals(), which is plain ===, we can go one step further and replace each
+      // normalized token with an integer ID shared by all tokens that normalize to the same value.
+      // The diff loop then compares small integers instead of (possibly long) strings, and the
+      // normalized strings can be garbage collected before it starts, rather than being kept
+      // alive for the whole diff. A custom comparator or equals() could implement any notion of
+      // equality, so in those cases we have to keep passing the normalized tokens themselves.
+      const ids = new Map<TokenT, number>();
+      let nextId = 0;
+      const toIds = (tokens: TokenT[]) => {
+        const out = new Int32Array(tokens.length);
+        for (let i = 0; i < tokens.length; i++) {
+          const token = this.normalizeToken(tokens[i], options);
+          let id = ids.get(token);
+          if (id === undefined) {
+            id = nextId++;
+            // A Map treats NaN as equal to itself, but === doesn't, so each NaN gets its own ID.
+            if (!Number.isNaN(token)) {
+              ids.set(token, id);
+            }
+          }
+          out[i] = id;
+        }
+        return out;
+      };
+      // Int32Array elements compare with === just like the tokens they stand for, so the rest of
+      // the algorithm can treat them as tokens.
+      oldNormalized = toIds(oldTokens) as unknown as TokenT[];
+      newNormalized = toIds(newTokens) as unknown as TokenT[];
+    } else {
+      oldNormalized = oldTokens.map(token => this.normalizeToken(token, options));
+      newNormalized = newTokens.map(token => this.normalizeToken(token, options));
+    }
 
     // Seed editLength = 0, i.e. the content starts with the same values
     const initialPath: Path = { oldPos: -1, lastComponent: undefined };

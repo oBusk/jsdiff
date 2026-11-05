@@ -1,4 +1,5 @@
 import {diffArrays} from '../../libesm/diff/array.js';
+import Diff from '../../libesm/diff/base.js';
 
 import {expect} from 'chai';
 
@@ -29,6 +30,36 @@ describe('diff/array', function() {
         {count: 2, value: [a, b], removed: false, added: false},
         {count: 1, value: [b], removed: true, added: false},
         {count: 1, value: [a], removed: false, added: false},
+        {count: 1, value: [c], removed: false, added: true}
+      ]);
+    });
+    it('should treat NaN as unequal to itself, like ===', function() {
+      expect(diffArrays([1, NaN, 2], [1, NaN, 2])).to.deep.equals([
+        {count: 1, value: [1], removed: false, added: false},
+        {count: 1, value: [NaN], removed: true, added: false},
+        {count: 1, value: [NaN], removed: false, added: true},
+        {count: 1, value: [2], removed: false, added: false}
+      ]);
+    });
+    it('should call an equals() overridden by a subclass with the tokens', function() {
+      class ByIdDiff extends Diff {
+        equals(left, right) {
+          return left.id === right.id;
+        }
+        join(tokens) {
+          return tokens;
+        }
+        removeEmpty(array) {
+          return array;
+        }
+        tokenize(value) {
+          return value.slice();
+        }
+      }
+      const a = {id: 1}, b = {id: 2}, c = {id: 3};
+      expect(new ByIdDiff().diff([a, b], [{id: 1}, c])).to.deep.equals([
+        {count: 1, value: [{id: 1}], removed: false, added: false},
+        {count: 1, value: [b], removed: true, added: false},
         {count: 1, value: [c], removed: false, added: true}
       ]);
     });
