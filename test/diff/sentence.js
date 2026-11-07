@@ -35,6 +35,15 @@ describe('diff/sentence', function() {
       ))).to.eql([
         '    foo bar baz.'
       ]);
+
+      expect(sentenceDiff.removeEmpty(sentenceDiff.tokenize(
+        'Foo. Bar.  '
+      ))).to.eql([
+        'Foo.',
+        ' ',
+        'Bar.',
+        '  '
+      ]);
     });
   });
 
