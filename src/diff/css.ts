@@ -3,7 +3,8 @@ import type { ChangeObject, CallbackOptionAbortable, CallbackOptionNonabortable,
 
 class CssDiff extends Diff<string, string> {
   tokenize(value: string) {
-    return value.split(/([{}:;,]|\s+)/);
+    // Each token is a single punctuation mark, a run of whitespace, or a run of anything else.
+    return value.match(/[{}:;,]|\s+|[^{}:;,\s]+/g) || [];
   }
 }
 

@@ -1,9 +1,17 @@
-import {diffCss} from '../../libesm/diff/css.js';
+import {diffCss, cssDiff} from '../../libesm/diff/css.js';
 import {convertChangesToXML} from '../../libesm/convert/xml.js';
 
 import {expect} from 'chai';
 
 describe('diff/css', function() {
+  describe('tokenize', function() {
+    it('should make punctuation marks, runs of whitespace and runs of anything else into tokens', function() {
+      expect(cssDiff.tokenize('')).to.eql([]);
+      expect(cssDiff.tokenize('a .b,c{x: 1px  2px;}\n')).to.eql(
+        ['a', ' ', '.b', ',', 'c', '{', 'x', ':', ' ', '1px', '  ', '2px', ';', '}', '\n']);
+    });
+  });
+
   describe('#diffCss', function() {
     it('should diff css', function() {
       const diffResult = diffCss(
