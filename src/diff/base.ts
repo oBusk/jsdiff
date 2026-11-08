@@ -30,6 +30,9 @@ interface Path {
 interface Discarded {
   // Tokens before this index form the common prefix of both texts and are left out below.
   start: number;
+  // The number of tokens at the end that form a common suffix and are left out below (only with
+  // the discardFrequentTokens option; see discardUnmatched()).
+  suffix: number;
   // The kept tokens, each replaced by a number shared by all tokens equal to it (see
   // numberTokens()), and their indices in the full token arrays.
   oldIds: Int32Array;
@@ -82,14 +85,15 @@ function hashString(s: string): number {
 }
 
 /**
- * Numbers the distinct tokens in oldTokens and newTokens from index `start` onwards, so that two
- * tokens get the same number exactly when they are ===. Returns the numbers of the old tokens, of
- * the new tokens, and how many numbers were handed out.
+ * Numbers the distinct tokens in oldTokens and newTokens from index `start` onwards, leaving out
+ * the last `suffix` of each, so that two tokens get the same number exactly when they are ===.
+ * Returns the numbers of the old tokens, of the new tokens, and how many numbers were handed out.
  */
 function numberTokens<TokenT>(
   oldTokens: TokenT[],
   newTokens: TokenT[],
-  start: number
+  start: number,
+  suffix: number
 ): [Int32Array, Int32Array, number] {
   // String tokens go in a hash table of our own rather than a Map, because V8 internalizes strings
   // used as Map keys: for a token that is a slice of the input, that allocates a full copy that
@@ -97,7 +101,7 @@ function numberTokens<TokenT>(
   // ourselves and only compare strings with ===, which copies nothing. The table is at most half
   // full, so probe sequences stay short.
   let capacity = 16;
-  while (capacity < (oldTokens.length + newTokens.length - 2 * start) * 2) {
+  while (capacity < (oldTokens.length + newTokens.length - 2 * (start + suffix)) * 2) {
     capacity *= 2;
   }
   const mask = capacity - 1,
@@ -109,8 +113,9 @@ function numberTokens<TokenT>(
   const otherIds = new Map<TokenT, number>();
   let nextId = 0;
   function toIds(tokens: TokenT[]) {
-    const ids = new Int32Array(tokens.length - start);
-    for (let i = start; i < tokens.length; i++) {
+    const end = tokens.length - suffix;
+    const ids = new Int32Array(end - start);
+    for (let i = start; i < end; i++) {
       const token = tokens[i];
       let id;
       if (typeof token === 'string') {
@@ -149,19 +154,16 @@ function numberTokens<TokenT>(
   return [oldIds, newIds, nextId];
 }
 
-// The numbers that occur on the other side, and the indices (counting from `start`) of the tokens
-// they belong to.
-function keep(ids: Int32Array, otherCounts: Int32Array, start: number): [Int32Array, Int32Array] {
-  let kept = 0;
+// The numbers of the tokens to keep, and their indices (counting from `start`).
+function keep(ids: Int32Array, kept: Uint8Array, start: number): [Int32Array, Int32Array] {
+  let keptCount = 0;
   for (let i = 0; i < ids.length; i++) {
-    if (otherCounts[ids[i]]) {
-      kept++;
-    }
+    keptCount += kept[i];
   }
-  const keptIds = new Int32Array(kept),
-        indices = new Int32Array(kept);
+  const keptIds = new Int32Array(keptCount),
+        indices = new Int32Array(keptCount);
   for (let i = 0, j = 0; i < ids.length; i++) {
-    if (otherCounts[ids[i]]) {
+    if (kept[i]) {
       keptIds[j] = ids[i];
       indices[j++] = start + i;
     }
@@ -169,18 +171,104 @@ function keep(ids: Int32Array, otherCounts: Int32Array, start: number): [Int32Ar
   return [keptIds, indices];
 }
 
+// What to do with each token in xdiff's scheme (see frequentTokensToKeep()).
+const DISCARD = 0, KEEP = 1, INVESTIGATE = 2;
+
+// Integer square root approximation, as in xdiff (xdl_bogosqrt).
+function bogosqrt(n: number): number {
+  let i = 1;
+  for (; n > 0; n = Math.floor(n / 4)) {
+    i *= 2;
+  }
+  return i;
+}
+
+/**
+ * Port of xdiff's xdl_clean_mmatch: whether to discard a token with many matches (action
+ * INVESTIGATE) at index i. It is discarded when it sits in a run of tokens that are being
+ * discarded or have many matches too, with discarded tokens on both sides of it within 100 tokens,
+ * and those runs are mostly discarded tokens.
+ */
+function discardMultimatch(action: Uint8Array, i: number): boolean {
+  const start = Math.max(0, i - 100), end = Math.min(action.length - 1, i + 100);
+  let discardsBefore = 0, multimatchesBefore = 1;
+  for (let j = i - 1; j >= start && action[j] !== KEEP; j--) {
+    if (action[j] === DISCARD) {
+      discardsBefore++;
+    } else {
+      multimatchesBefore++;
+    }
+  }
+  if (!discardsBefore) {
+    return false;
+  }
+  let discards = 0, multimatches = 1;
+  for (let j = i + 1; j <= end && action[j] !== KEEP; j++) {
+    if (action[j] === DISCARD) {
+      discards++;
+    } else {
+      multimatches++;
+    }
+  }
+  if (!discards) {
+    return false;
+  }
+  discards += discardsBefore;
+  multimatches += multimatchesBefore;
+  return multimatches * 4 < multimatches + discards;
+}
+
+/**
+ * Which tokens to keep, as xdiff's xdl_cleanup_records decides: a token with no match on the other
+ * side is discarded; so is a token with at least about √n matches (for n tokens on its own side,
+ * and at most 1024) if discardMultimatch() says so; every other token is kept.
+ */
+function frequentTokensToKeep(ids: Int32Array, otherCounts: Int32Array, tokenCount: number): Uint8Array {
+  const limit = Math.min(bogosqrt(tokenCount), 1024);
+  const action = new Uint8Array(ids.length);
+  for (let i = 0; i < ids.length; i++) {
+    const matches = otherCounts[ids[i]];
+    if (!matches) {
+      action[i] = DISCARD;
+    } else if (matches < limit) {
+      action[i] = KEEP;
+    } else {
+      action[i] = INVESTIGATE;
+    }
+  }
+  const kept = new Uint8Array(ids.length);
+  for (let i = 0; i < ids.length; i++) {
+    kept[i] = action[i] === KEEP || (action[i] === INVESTIGATE && !discardMultimatch(action, i)) ? 1 : 0;
+  }
+  return kept;
+}
+
 /**
  * Finds the tokens from index `start` onwards that have no match at all on the other side. No path
  * through the edit graph can match such a token, so it's removed (or added) whatever the diff, and
  * the search can leave it out; on inputs that differ a lot, that makes the search much smaller.
  * (GNU diff and xdiff do the same.) Returns undefined if every token has a match.
+ *
+ * With `frequent` (the discardFrequentTokens option), this also leaves out the common suffix and
+ * discards some tokens that do have matches, like xdiff does: see frequentTokensToKeep(). That
+ * changes the result, which may no longer be the shortest possible, so it never returns undefined
+ * then; the search always runs on what it leaves.
  */
 function discardUnmatched<TokenT>(
   oldTokens: TokenT[],
   newTokens: TokenT[],
-  start: number
+  start: number,
+  frequent: boolean
 ): Discarded | undefined {
-  const [oldIds, newIds, idCount] = numberTokens(oldTokens, newTokens, start);
+  let suffix = 0;
+  if (frequent) {
+    const maxSuffix = Math.min(oldTokens.length, newTokens.length) - start;
+    while (suffix < maxSuffix
+        && oldTokens[oldTokens.length - 1 - suffix] === newTokens[newTokens.length - 1 - suffix]) {
+      suffix++;
+    }
+  }
+  const [oldIds, newIds, idCount] = numberTokens(oldTokens, newTokens, start, suffix);
   const oldCounts = new Int32Array(idCount),
         newCounts = new Int32Array(idCount);
   for (let i = 0; i < oldIds.length; i++) {
@@ -189,18 +277,27 @@ function discardUnmatched<TokenT>(
   for (let i = 0; i < newIds.length; i++) {
     newCounts[newIds[i]]++;
   }
-  const [oldKeptIds, oldIndices] = keep(oldIds, newCounts, start),
-        [newKeptIds, newIndices] = keep(newIds, oldCounts, start);
+  let oldKept, newKept;
+  if (frequent) {
+    oldKept = frequentTokensToKeep(oldIds, newCounts, oldTokens.length);
+    newKept = frequentTokensToKeep(newIds, oldCounts, newTokens.length);
+  } else {
+    oldKept = Uint8Array.from(oldIds, id => (newCounts[id] ? 1 : 0));
+    newKept = Uint8Array.from(newIds, id => (oldCounts[id] ? 1 : 0));
+  }
+  const [oldKeptIds, oldIndices] = keep(oldIds, oldKept, start),
+        [newKeptIds, newIndices] = keep(newIds, newKept, start);
   const count = oldIds.length - oldIndices.length + newIds.length - newIndices.length;
-  if (!count) {
+  if (!count && !frequent) {
     return undefined;
   }
-  return {start, oldIds: oldKeptIds, newIds: newKeptIds, oldIndices, newIndices, count};
+  return {start, suffix, oldIds: oldKeptIds, newIds: newKeptIds, oldIndices, newIndices, count};
 }
 
 /**
  * Turns the components found by a search over the tokens kept by discardUnmatched() back into
- * components over the full texts, by putting back the common prefix and the discarded tokens.
+ * components over the full texts, by putting back the common prefix and suffix and the discarded
+ * tokens.
  *
  * A discarded old token goes in as a removal as early as it can: right after the old token before
  * it, ahead of any addition that could come first. A discarded new token goes in as an addition as
@@ -234,6 +331,7 @@ function expandDiscarded(
     }
   }
   const {oldIndices, newIndices} = discarded;
+  const oldEnd = oldLen - discarded.suffix, newEnd = newLen - discarded.suffix;
   // Positions in the full token arrays up to which tokens have been emitted, and in the kept ones.
   let oldPos = discarded.start, newPos = discarded.start, oldKept = 0, newKept = 0;
   function removeUpTo(end: number) {
@@ -249,7 +347,7 @@ function expandDiscarded(
   for (const component of components) {
     for (let i = 0; i < component.count; i++) {
       if (component.added) {
-        removeUpTo(oldKept < oldIndices.length ? oldIndices[oldKept] : oldLen);
+        removeUpTo(oldKept < oldIndices.length ? oldIndices[oldKept] : oldEnd);
         addUpTo(newIndices[newKept++]);
         push(true, false, 1);
         newPos++;
@@ -266,8 +364,9 @@ function expandDiscarded(
       }
     }
   }
-  removeUpTo(oldLen);
-  addUpTo(newLen);
+  removeUpTo(oldEnd);
+  addUpTo(newEnd);
+  push(false, false, discarded.suffix);
   return result;
 }
 
@@ -434,17 +533,20 @@ export default class Diff<
     // The edit length at which the drivers below call discardUnmatchedTokens() instead of
     // execEditLength(), or -1 for never. Tokens can only be discarded when they are compared with
     // plain ===, since we need to hash them; a comparator or an overridden equals() could
-    // implement any notion of equality.
+    // implement any notion of equality. With discardFrequentTokens, which changes the result
+    // anyway, we discard right away, as xdiff does.
+    const frequent = !!options.discardFrequentTokens;
     let discardAt = -1;
     if (!options.comparator && this.equals === Diff.prototype.equals) {
-      discardAt = discardEditLength(oldLen + newLen - 2 * prefixLen);
+      discardAt = frequent ? 1 : discardEditLength(oldLen + newLen - 2 * prefixLen);
     }
 
     // Restarts the search without the tokens after the common prefix that have no match on the
-    // other side. The result is the same; see discardUnmatched() and expandDiscarded().
+    // other side. The result is the same; see discardUnmatched() and expandDiscarded(). (With
+    // discardFrequentTokens it isn't, and the search always restarts.)
     function discardUnmatchedTokens() {
       discardAt = -1;
-      const result = discardUnmatched(oldNormalized, newNormalized, prefixLen);
+      const result = discardUnmatched(oldNormalized, newNormalized, prefixLen, frequent);
       if (!result) {
         // Nothing to discard, so carry on with the search we have.
         return undefined;

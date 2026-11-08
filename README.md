@@ -224,6 +224,8 @@ Certain options can be provided in the `options` object of *any* method that cal
 
 * `oneChangePerToken`: if `true`, the array of change objects returned will contain one change object per token (e.g. one per line if calling `diffLines`), instead of runs of consecutive tokens that are all added / all removed / all conserved being combined into a single change object.
 
+* `discardFrequentTokens`: if `true`, preprocess the texts the way Git's xdiff does (unless run with `--minimal`) before searching for the diff: trim the common prefix and suffix, discard every token that doesn't occur in the other text, and also discard tokens that occur many times in the other text (at least about the square root of the number of tokens) when they sit among discarded tokens. Discarded tokens show up as removed or added. This can make diffing very different texts much faster, and tends to keep a common line like `}` from splitting up a large change, but the result is no longer guaranteed to be the shortest possible edit script, and can differ from the default result even when it is. Has no effect when `comparator` is given. (Without this option, jsdiff still discards tokens that don't occur in the other text when that helps, but in a way that doesn't change the result; see [Deviations from the published Myers diff algorithm](#deviations-from-the-published-myers-diff-algorithm).)
+
 ### Defining custom diffing behaviors
 
 If you need behavior a little different to what any of the text diffing functions above offer, you can roll your own by customizing both the tokenization behavior used and the notion of equality used to determine if two tokens are equal.

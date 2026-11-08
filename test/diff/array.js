@@ -198,6 +198,53 @@ describe('diff/array', function() {
         }
       });
 
+      describe('given options.discardFrequentTokens', function() {
+        it('trims the common suffix as well as the prefix', function() {
+          // Without the option, this diffs as `-B =A -A`.
+          expect(diffArrays(['B', 'A', 'A'], ['A'], {discardFrequentTokens: true})).to.deep.equal([
+            {count: 2, value: ['B', 'A'], added: false, removed: true},
+            {count: 1, value: ['A'], added: false, removed: false}
+          ]);
+        });
+
+        it('discards tokens with many matches that sit among discarded ones', function() {
+          // Blocks of five changed lines, separated by } lines. Without the option, every } is
+          // kept; with it, all but the last (which is in the common suffix) are discarded.
+          const a = [], b = [];
+          for (let i = 0; i < 50; i++) {
+            a.push(...range(`o${i}_`, 5), '}');
+            b.push(...range(`n${i}_`, 5), '}');
+          }
+          expect(diffArrays(a, b)).to.have.length(150);
+          expect(diffArrays(a, b, {discardFrequentTokens: true})).to.deep.equal([
+            {count: 299, value: a.slice(0, -1), added: false, removed: true},
+            {count: 299, value: b.slice(0, -1), added: true, removed: false},
+            {count: 1, value: ['}'], added: false, removed: false}
+          ]);
+        });
+
+        it('returns diffs that turn the old array into the new one', function() {
+          let seed = 7;
+          function random(n) {
+            seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+            return seed % n;
+          }
+          for (let i = 0; i < 200; i++) {
+            const a = Array.from({length: random(300)}, () => (random(3) ? 't' + random(4) : 'o' + random(1e9)));
+            const b = a.filter(() => random(10)).map(t => (random(4) ? t : 'n' + random(1e9)));
+            const diff = diffArrays(a, b, {discardFrequentTokens: true});
+            expect(diff.filter(c => !c.added).flatMap(c => c.value)).to.deep.equal(a);
+            expect(diff.filter(c => !c.removed).flatMap(c => c.value)).to.deep.equal(b);
+          }
+        });
+
+        it('has no effect with a comparator', function() {
+          const a = ['B', 'A', 'A'], b = ['A'];
+          expect(diffArrays(a, b, {comparator: (l, r) => l === r, discardFrequentTokens: true}))
+            .to.deep.equal(diffArrays(a, b));
+        });
+      });
+
       describe('given options.maxEditLength', function() {
         // 20 discarded tokens, plus 4 edits to turn x s y into y s x.
         const a = ['x', 's', 'y', ...range('o', 10)], b = ['y', 's', 'x', ...range('n', 10)];

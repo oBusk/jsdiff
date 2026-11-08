@@ -30,6 +30,10 @@ export interface CommonDiffOptions {
    * If `true`, the array of change objects returned will contain one change object per token (e.g. one per line if calling `diffLines`), instead of runs of consecutive tokens that are all added / all removed / all conserved being combined into a single change object.
    */
   oneChangePerToken?: boolean,
+  /**
+   * If `true`, before searching for the diff, trim the common prefix and suffix, and discard tokens that have no match in the other text, plus tokens that have many matches (at least about the square root of the number of tokens) when they sit among discarded ones, like Git's xdiff does unless run with `--minimal`. This can make diffs of very different texts much faster, but the result may no longer be the shortest possible edit script, and it can differ from the default result even when it is. Has no effect when `comparator` is given.
+   */
+  discardFrequentTokens?: boolean,
 }
 
 export interface TimeoutOption {
