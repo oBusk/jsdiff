@@ -103,6 +103,21 @@ describe('diff/json', function() {
       expect(convertChangesToXML(diffResult)).to.equal('{\n  &quot;a&quot;: 123,\n  &quot;b&quot;: 456,\n<ins>  &quot;c&quot;: 789\n</ins>}');
     });
 
+    it('should ignore the trailing comma on lines next to discarded ones', function() {
+      // The a.. keys only exist in the new object, and there are enough of them that the diff
+      // discards them before searching the rest. "b": 2 still has to match "b": 2, and show with
+      // its comma.
+      const newObject = {a: 1, b: 2, c: 3};
+      for (let i = 10; i < 30; i++) {
+        newObject['a' + i] = 0;
+      }
+      const diffResult = diffJson({a: 1, b: 2}, newObject);
+      const added = Array.from({length: 20}, (_, i) => `  &quot;a${i + 10}&quot;: 0,\n`).join('');
+      expect(convertChangesToXML(diffResult)).to.equal(
+        `{\n  &quot;a&quot;: 1,\n<ins>${added}</ins>  &quot;b&quot;: 2,\n<ins>  &quot;c&quot;: 3\n</ins>}`
+      );
+    });
+
     it('should throw an error if one of the objects being diffed has a circular reference', function() {
       const circular = {foo: 123};
       circular.bar = circular;

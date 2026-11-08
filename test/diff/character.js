@@ -115,8 +115,10 @@ describe('diff/character', function() {
     it('does not starve timers while it runs', function(done) {
       // Confirm that we're actually yielding control back to the event loop in a way that allows
       // other stuff to run - that is after all the point of async mode!
-      const oldText = 'ax'.repeat(1000);
-      const newText = 'ay'.repeat(1000);
+      // The trailing y and x give every character a match on the other side; otherwise the diff
+      // would discard the x's and y's and finish in a few iterations.
+      const oldText = 'ax'.repeat(1000) + 'y';
+      const newText = 'ay'.repeat(1000) + 'x';
       let ticks = 0;
       const interval = setInterval(() => { ticks++; }, 1);
       diffChars(oldText, newText, {callback: () => {

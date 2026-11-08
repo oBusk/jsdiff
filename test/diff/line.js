@@ -101,6 +101,23 @@ describe('diff/line', function() {
     });
   });
 
+  describe('lines with no match on the other side', function() {
+    it('are found by comparing lines the way the options say', function() {
+      // There are enough unmatched lines here that the diff discards them before searching the
+      // rest; X and Y must still match x and y.
+      const oldLines = Array.from({length: 20}, (_, i) => `old ${i}\n`).join(''),
+            newLines = Array.from({length: 20}, (_, i) => `new ${i}\n`).join('');
+      const diffResult = diffLines(
+        `X\n${oldLines}  Y\n`,
+        `x\n${newLines}y  \n`,
+        {ignoreCase: true, ignoreWhitespace: true}
+      );
+      expect(convertChangesToXML(diffResult)).to.equal(
+        `x\n<del>${oldLines}</del><ins>${newLines}</ins>y  \n`
+      );
+    });
+  });
+
   describe('oneChangePerToken option', function() {
     it('emits one change per line', function() {
       const diffResult = diffLines(

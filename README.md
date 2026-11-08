@@ -463,7 +463,8 @@ See [LICENSE](https://github.com/kpdecker/jsdiff/blob/master/LICENSE).
 
 ## Deviations from the published Myers diff algorithm
 
-jsdiff deviates from the published algorithm in a couple of ways that don't affect results but do affect performance:
+jsdiff deviates from the published algorithm in a few ways that don't affect results but do affect performance:
 
 * jsdiff keeps track of the diff for each diagonal using a linked list of change objects for each diagonal, rather than the historical array of furthest-reaching D-paths on each diagonal contemplated on page 8 of Myers's paper.
 * jsdiff skips considering diagonals where the furthest-reaching D-path would go off the edge of the edit graph. This dramatically reduces the time cost (from quadratic to linear) in cases where the new text just appends or truncates content at the end of the old text.
+* If the diff turns out to be expensive, jsdiff discards the tokens that don't occur anywhere in the other text (after the common prefix), like GNU diff and Git do, and starts the search again on the tokens that are left. Each discarded token is removed or added whatever the diff, so this doesn't change the result: jsdiff puts each discarded removal as early as it can and each discarded addition as late as it can, which is where a search over every token puts them. But it makes the quadratic part of the work depend only on the tokens that occur in both texts, so diffing texts that have little in common becomes far faster. "Expensive" means the search has reached an edit length of 2√n (and at least 16) for n tokens, where it has done about as much work as discarding costs, so a diff with a short edit script never pays for discarding. This only happens when tokens are compared with `===` after normalization; with a `comparator`, or a subclass that overrides `equals`, the search runs on every token.
