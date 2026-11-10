@@ -1,6 +1,12 @@
 import type {ChangeObject, AllDiffOptions, AbortableDiffOptions, DiffCallbackNonabortable, CallbackOptionAbortable, CallbackOptionNonabortable, DiffCallbackAbortable, TimeoutOption, MaxEditLengthOption} from '../types.js';
 import {enqueueTask} from '../util/yield.js';
 
+// How many diagonals to compute between looks at the clock.
+const DIAGONALS_PER_CLOCK_CHECK = 128;
+
+// In async mode, how long to compute for before yielding to the event loop.
+const ASYNC_STEP_MS = 10;
+
 /**
  * Like a ChangeObject, but with no value and an extra `previousComponent` property.
  * A linked list of these (linked via `.previousComponent`) is used internally in the code below to
@@ -146,9 +152,18 @@ export default class Diff<
     const minEditLength = Math.abs(finalDiagonal);
     let editLength = minEditLength;
 
+    // A round can cover a very large number of diagonals, so execEditLength may stop partway
+    // through one. This is how many diagonals of the current round are already done.
+    let diagonalsDone = 0;
+
     // One round: extend every path that can still reach the end within editLength edits.
-    // Returns the result as soon as one does.
+    // Returns the result as soon as one does. Returns early, to be resumed by the next call,
+    // once the timeout has passed or, in async mode, once it is time to yield.
     const execEditLength = () => {
+      const stepDeadline = callback
+        ? Math.min(abortAfterTimestamp, Date.now() + ASYNC_STEP_MS)
+        : abortAfterTimestamp;
+
       // The band: every diagonal from 0 to finalDiagonal, widened by one diagonal on each side
       // per detour. It never leaves the edit graph, since editLength <= oldLen + newLen.
       let lowestDiagonal = (finalDiagonal - editLength) / 2,
@@ -168,7 +183,13 @@ export default class Diff<
       // so it extends a path from the previous round. finalDiagonal comes last because both of
       // its neighbours are computed this round.
       const diagonalsBelowFinal = finalDiagonal - lowestDiagonal;
-      for (let i = 0; i <= highestDiagonal - lowestDiagonal; i++) {
+      const diagonalsInRound = highestDiagonal - lowestDiagonal + 1;
+      for (let i = diagonalsDone; i < diagonalsInRound; i++) {
+        if (i > diagonalsDone && i % DIAGONALS_PER_CLOCK_CHECK === 0 && Date.now() > stepDeadline) {
+          diagonalsDone = i;
+          return;
+        }
+
         // i counts diagonals in that order; map it to the diagonal number k.
         let k;
         if (i < diagonalsBelowFinal) {
@@ -201,6 +222,7 @@ export default class Diff<
         }
       }
 
+      diagonalsDone = 0;
       editLength += 2;
     };
 
