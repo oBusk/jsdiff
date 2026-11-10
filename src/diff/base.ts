@@ -181,19 +181,11 @@ export default class Diff<
         const removePath = bestPath[offset + k - 1],
               addPath = bestPath[offset + k + 1];
 
-        const canAdd = addPath && addPath.oldPos - k < newLen;
-        const canRemove = removePath && removePath.oldPos + 1 < oldLen;
-        if (!canAdd && !canRemove) {
-          // Both moves onto k would leave the edit graph, so no path ends on k this round.
-          // @ts-expect-error - perf optimisation. This type-violating value will never be read.
-          bestPath[offset + k] = undefined;
-          continue;
-        }
-
         // Select the diagonal that we want to branch from. We select the prior
-        // path whose position in the old string is the farthest from the origin
-        // and does not pass the bounds of the diff graph
-        if (!canRemove || (canAdd && removePath.oldPos < addPath.oldPos)) {
+        // path whose position in the old string is the farthest from the origin.
+        // Neither move can leave the edit graph: a path that reaches an edge of
+        // it completes the diff within the same round.
+        if (!removePath || (addPath && removePath.oldPos < addPath.oldPos)) {
           basePath = this.addToPath(addPath, true, false, 0, options);
         } else {
           basePath = this.addToPath(removePath, false, true, 1, options);
