@@ -170,7 +170,6 @@ export default class Diff<
       runCount = newRunCount;
       offset = newOffset;
     }
-    allocate();
 
     // Set by followDiagonal when a path reaches the end of both token lists.
     let finalComponent: DraftChangeObject | undefined;
@@ -217,6 +216,10 @@ export default class Diff<
         return true;
       }
 
+      if (!bestOldPos.length) {
+        // First path to be stored. Allocating this late keeps identical inputs from paying for it.
+        allocate();
+      }
       const index = offset + k;
       bestOldPos[index] = oldPos;
       bestComponent[index] = component;
