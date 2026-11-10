@@ -7,6 +7,12 @@ const DIAGONALS_PER_CLOCK_CHECK = 128;
 // In async mode, how long to compute for before yielding to the event loop.
 const ASYNC_STEP_MS = 10;
 
+// Marks a diagonal with no path on it. Real positions are >= -1.
+const NO_PATH = -2;
+
+// The type of the run of tokens that a path ends with.
+const COMMON = 0, ADDED = 1, REMOVED = 2;
+
 /**
  * Like a ChangeObject, but with no value and an extra `previousComponent` property.
  * A linked list of these (linked via `.previousComponent`) is used internally in the code below to
@@ -21,11 +27,6 @@ interface DraftChangeObject {
 
     // Only added in buildValues:
     value?: any;
-}
-
-interface Path {
-  oldPos: number;
-  lastComponent: DraftChangeObject | undefined
 }
 
 export default class Diff<
@@ -109,27 +110,7 @@ export default class Diff<
     // original tokens.
     const oldNormalized = oldTokens.map(token => this.normalizeToken(token, options)),
           newNormalized = newTokens.map(token => this.normalizeToken(token, options));
-
-    // Seed editLength = 0, i.e. the content starts with the same values
-    const initialPath: Path = { oldPos: -1, lastComponent: undefined };
-    let newPos = this.extractCommon(initialPath, newNormalized, oldNormalized, 0, options);
-    if (initialPath.oldPos + 1 >= oldLen && newPos + 1 >= newLen) {
-      // The texts are identical (per the definition of "identical" implied by
-      // tokenize, normalizeToken, and equals).
-      return done(this.buildValues(initialPath.lastComponent, newTokens, oldTokens));
-    }
-
-    // bestPath[offset + k] holds the furthest-reaching path on diagonal k = oldPos - newPos.
-    // Positions range over -1 <= oldPos < oldLen and -1 <= newPos < newLen, so the edit graph has
-    // the oldLen + newLen + 1 diagonals -newLen..oldLen, and the loop below never leaves them (see
-    // the comment on the band in execEditLength). The loop also reads k - 1 and k + 1, hence
-    // one spare slot on each side. Diagonals go negative, and JavaScript engines store negative
-    // array indices as ordinary named properties rather than as array elements, which would make
-    // every lookup in the loop a slow dictionary access; the offset keeps every index within
-    // [0, oldLen + newLen + 2].
-    const offset = newLen + 1;
-    const bestPath: Path[] = new Array(oldLen + newLen + 3);
-    bestPath[offset] = initialPath;
+    const oneChangePerToken = !!options.oneChangePerToken;
 
     // Every path goes from diagonal 0 to finalDiagonal, one diagonal per edit, and each move
     // away from finalDiagonal must be undone by a move back. So
@@ -145,6 +126,112 @@ export default class Diff<
     const minEditLength = Math.abs(finalDiagonal);
     let editLength = minEditLength;
 
+    // The furthest-reaching path on each diagonal k = oldPos - newPos is stored at index
+    // offset + k of four parallel arrays, rather than as one object per path:
+    //
+    //  - bestOldPos: the path's position in the old tokens, or NO_PATH.
+    //  - runType and runCount: the run of same-typed tokens that the path currently ends with.
+    //  - bestComponent: the path's components before that run, as a linked list.
+    //
+    // Keeping the last run as two numbers means a step that extends the run allocates nothing;
+    // a component object is only created once the run is over. Each round has to keep a path
+    // on every diagonal of the band alive for the next round to read, so one object per path
+    // per round would otherwise dominate memory use for diffs with a wide band.
+    //
+    // The arrays cover the band (see execEditLength) plus `spare` detours on each side, plus one
+    // slot on each side that the loop reads but never writes. They are reallocated with twice
+    // the spare whenever the band outgrows them, so their size follows the size of the diff
+    // rather than the size of the inputs. A path makes at most min(oldLen, newLen) detours.
+    let spare = Math.min(16, oldLen, newLen);
+    let offset = 0;
+    let bestOldPos = new Int32Array(0),
+        bestComponent: (DraftChangeObject | undefined)[] = [],
+        runType = new Uint8Array(0),
+        runCount = new Int32Array(0);
+    function allocate() {
+      const newOffset = spare + 1 - Math.min(0, finalDiagonal),
+            size = minEditLength + 2 * spare + 3,
+            shift = newOffset - offset;
+      const newOldPos = new Int32Array(size).fill(NO_PATH),
+            newComponent: (DraftChangeObject | undefined)[] = new Array(size),
+            newRunType = new Uint8Array(size),
+            newRunCount = new Int32Array(size);
+      if (bestOldPos.length) {
+        newOldPos.set(bestOldPos, shift);
+        newRunType.set(runType, shift);
+        newRunCount.set(runCount, shift);
+        for (let i = 0; i < bestComponent.length; i++) {
+          newComponent[i + shift] = bestComponent[i];
+        }
+      }
+      bestOldPos = newOldPos;
+      bestComponent = newComponent;
+      runType = newRunType;
+      runCount = newRunCount;
+      offset = newOffset;
+    }
+    allocate();
+
+    // Set by followDiagonal when a path reaches the end of both token lists.
+    let finalComponent: DraftChangeObject | undefined;
+
+    // Takes a path that has just arrived on diagonal k at oldPos, ending with a run of `count`
+    // tokens of `type` preceded by `component`, and extends it along the diagonal over all the
+    // common tokens that follow. Returns true if that reaches the end of both token lists;
+    // otherwise stores the path as the best one on diagonal k.
+    const followDiagonal = (
+      k: number,
+      oldPos: number,
+      component: DraftChangeObject | undefined,
+      type: number,
+      count: number
+    ): boolean => {
+      let newPos = oldPos - k,
+          commonCount = 0;
+      while (newPos + 1 < newLen && oldPos + 1 < oldLen && this.equals(oldNormalized[oldPos + 1], newNormalized[newPos + 1], options)) {
+        newPos++;
+        oldPos++;
+        commonCount++;
+      }
+
+      if (commonCount) {
+        // The run of edits is over; the common tokens become the new run.
+        if (count) {
+          component = {count, added: type === ADDED, removed: type === REMOVED, previousComponent: component};
+        }
+        if (oneChangePerToken) {
+          for (let i = 1; i < commonCount; i++) {
+            component = {count: 1, added: false, removed: false, previousComponent: component};
+          }
+          count = 1;
+        } else {
+          count = commonCount;
+        }
+        type = COMMON;
+      }
+
+      if (oldPos + 1 >= oldLen && newPos + 1 >= newLen) {
+        finalComponent = count
+          ? {count, added: type === ADDED, removed: type === REMOVED, previousComponent: component}
+          : component;
+        return true;
+      }
+
+      const index = offset + k;
+      bestOldPos[index] = oldPos;
+      bestComponent[index] = component;
+      runType[index] = type;
+      runCount[index] = count;
+      return false;
+    };
+
+    // Seed editLength = 0, i.e. the content starts with the same values
+    if (followDiagonal(0, -1, undefined, COMMON, 0)) {
+      // The texts are identical (per the definition of "identical" implied by
+      // tokenize, normalizeToken, and equals).
+      return done(this.buildValues(finalComponent, newTokens, oldTokens));
+    }
+
     // A round can span very many diagonals, so execEditLength may stop partway through one.
     // This is how many diagonals of the current round are already done.
     let diagonalsDone = 0;
@@ -156,6 +243,11 @@ export default class Diff<
       const stepDeadline = callback
         ? Math.min(abortAfterTimestamp, Date.now() + ASYNC_STEP_MS)
         : abortAfterTimestamp;
+
+      if ((editLength - minEditLength) / 2 > spare) {
+        spare = Math.min(spare * 2, oldLen, newLen);
+        allocate();
+      }
 
       // The band: diagonals 0 to finalDiagonal, widened by one on each side per move away. It
       // never leaves the edit graph, since editLength <= oldLen + newLen.
@@ -188,26 +280,32 @@ export default class Diff<
           ? lowestDiagonal + i
           : highestDiagonal - (i - diagonalsBelowFinal);
 
-        let basePath;
-        const removePath = bestPath[offset + k - 1],
-              addPath = bestPath[offset + k + 1];
+        const index = offset + k;
+        const removeOldPos = bestOldPos[index - 1],
+              addOldPos = bestOldPos[index + 1];
 
         // Select the diagonal that we want to branch from. We select the prior
         // path whose position in the old string is the farthest from the origin.
         // Neither can leave the edit graph: a path at its edge finishes that round.
-        if (!removePath || (addPath && removePath.oldPos < addPath.oldPos)) {
-          basePath = this.addToPath(addPath, true, false, 0, options);
-        } else {
-          basePath = this.addToPath(removePath, false, true, 1, options);
+        // NO_PATH is lower than any real position, so a diagonal without a path is
+        // never selected.
+        const add = removeOldPos < addOldPos;
+        const from = add ? index + 1 : index - 1;
+        const editType = add ? ADDED : REMOVED;
+
+        // Append the edit to that path's last run if it has the same type; otherwise that run
+        // is over, and the edit starts a new one.
+        let component = bestComponent[from],
+            count = runCount[from];
+        const type = runType[from];
+        if (count && (type !== editType || oneChangePerToken)) {
+          component = {count, added: type === ADDED, removed: type === REMOVED, previousComponent: component};
+          count = 0;
         }
 
-        newPos = this.extractCommon(basePath, newNormalized, oldNormalized, k, options);
-
-        if (basePath.oldPos + 1 >= oldLen && newPos + 1 >= newLen) {
+        if (followDiagonal(k, add ? addOldPos : removeOldPos + 1, component, editType, count + 1)) {
           // If we have hit the end of both strings, then we are done
-          return done(this.buildValues(basePath.lastComponent, newTokens, oldTokens)) || true;
-        } else {
-          bestPath[offset + k] = basePath;
+          return done(this.buildValues(finalComponent, newTokens, oldTokens)) || true;
         }
       }
 
@@ -239,57 +337,6 @@ export default class Diff<
         }
       }
     }
-  }
-
-  private addToPath(
-    path: Path,
-    added: boolean,
-    removed: boolean,
-    oldPosInc: number,
-    options: AllDiffOptions
-  ): Path {
-    const last = path.lastComponent;
-    if (last && !options.oneChangePerToken && last.added === added && last.removed === removed) {
-      return {
-        oldPos: path.oldPos + oldPosInc,
-        lastComponent: {count: last.count + 1, added: added, removed: removed, previousComponent: last.previousComponent }
-      };
-    } else {
-      return {
-        oldPos: path.oldPos + oldPosInc,
-        lastComponent: {count: 1, added: added, removed: removed, previousComponent: last }
-      };
-    }
-  }
-
-  private extractCommon(
-    basePath: Path,
-    newTokens: TokenT[],
-    oldTokens: TokenT[],
-    k: number,
-    options: AllDiffOptions
-  ): number {
-    const newLen = newTokens.length,
-          oldLen = oldTokens.length;
-    let oldPos = basePath.oldPos,
-        newPos = oldPos - k,
-        commonCount = 0;
-
-    while (newPos + 1 < newLen && oldPos + 1 < oldLen && this.equals(oldTokens[oldPos + 1], newTokens[newPos + 1], options)) {
-      newPos++;
-      oldPos++;
-      commonCount++;
-      if (options.oneChangePerToken) {
-        basePath.lastComponent = {count: 1, previousComponent: basePath.lastComponent, added: false, removed: false};
-      }
-    }
-
-    if (commonCount && !options.oneChangePerToken) {
-      basePath.lastComponent = {count: commonCount, previousComponent: basePath.lastComponent, added: false, removed: false};
-    }
-
-    basePath.oldPos = oldPos;
-    return newPos;
   }
 
   // Receives tokens that have already been through normalizeToken().
