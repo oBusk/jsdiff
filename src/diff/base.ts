@@ -131,29 +131,22 @@ export default class Diff<
     const bestPath: Path[] = new Array(oldLen + newLen + 3);
     bestPath[offset] = initialPath;
 
-    // Every path starts on diagonal 0 and ends on finalDiagonal, and each edit moves it to a
-    // neighbouring diagonal. So |finalDiagonal| edits are forced, and every other edit is a
-    // detour away from finalDiagonal that costs one more edit to undo. That makes
-    // editLength = |finalDiagonal| + 2 * (number of detours).
+    // Every path goes from diagonal 0 to finalDiagonal, one diagonal per edit, and each move
+    // away from finalDiagonal must be undone by a move back. So
+    // editLength = |finalDiagonal| + 2 * (moves away from finalDiagonal).
     //
-    // Myers's algorithm runs one round per edit. Like "An O(NP) Sequence Comparison Algorithm"
-    // (Wu, Manber, Myers & Miller, 1990), we run one round per detour instead, trying
-    // editLength = |finalDiagonal|, then +2, +4, ..., and in each round we only compute paths
-    // that can still reach the end within editLength edits.
-    //
-    // Every path we compute is one Myers's algorithm also computes, built from the same
-    // neighbours with the same tie-break, so the result is identical; we just skip paths that
-    // can't finish in time. This takes O((N+M)(P+1)) time instead of O((N+M)D), where P is the
-    // number of insertions or of deletions in the result, whichever is smaller. So diffs that
-    // mostly insert or mostly delete finish in a single round.
+    // As in "An O(NP) Sequence Comparison Algorithm" (Wu, Manber, Myers & Miller, 1990), we run
+    // one round per move away rather than one per edit like Myers's algorithm: editLength =
+    // |finalDiagonal|, then +2, +4, ..., computing only the paths that can still finish within
+    // editLength. Those paths, their neighbours and the tie-break are the same as in Myers's
+    // algorithm, so the result is identical, but it takes O((N+M)(P+1)) time instead of
+    // O((N+M)D), where P is the smaller of the number of insertions and of deletions.
     const finalDiagonal = oldLen - newLen;
-
-    // The forced edits. Every editLength we try is this plus an even number.
     const minEditLength = Math.abs(finalDiagonal);
     let editLength = minEditLength;
 
-    // A round can cover a very large number of diagonals, so execEditLength may stop partway
-    // through one. This is how many diagonals of the current round are already done.
+    // A round can span very many diagonals, so execEditLength may stop partway through one.
+    // This is how many diagonals of the current round are already done.
     let diagonalsDone = 0;
 
     // One round: extend every path that can still reach the end within editLength edits.
@@ -164,8 +157,8 @@ export default class Diff<
         ? Math.min(abortAfterTimestamp, Date.now() + ASYNC_STEP_MS)
         : abortAfterTimestamp;
 
-      // The band: every diagonal from 0 to finalDiagonal, widened by one diagonal on each side
-      // per detour. It never leaves the edit graph, since editLength <= oldLen + newLen.
+      // The band: diagonals 0 to finalDiagonal, widened by one on each side per move away. It
+      // never leaves the edit graph, since editLength <= oldLen + newLen.
       let lowestDiagonal = (finalDiagonal - editLength) / 2,
           highestDiagonal = (finalDiagonal + editLength) / 2;
       if (editLength === minEditLength) {
@@ -177,11 +170,11 @@ export default class Diff<
         }
       }
 
-      // Walk toward finalDiagonal from both ends of the band: up from lowestDiagonal, then down
-      // from highestDiagonal, finishing on finalDiagonal. A move toward finalDiagonal is forced,
-      // so it can extend a path computed earlier in this round; a move away from it is a detour,
-      // so it extends a path from the previous round. finalDiagonal comes last because both of
-      // its neighbours are computed this round.
+      // A move toward finalDiagonal stays in the same round; a move away belongs to the next one.
+      // So we sweep toward finalDiagonal from both ends of the band, up from lowestDiagonal and
+      // then down from highestDiagonal. Each diagonal then reads its outer neighbour from this
+      // round and its inner one, not yet overwritten, from the previous round. finalDiagonal
+      // comes last, since both its neighbours are outer ones.
       const diagonalsBelowFinal = finalDiagonal - lowestDiagonal;
       const diagonalsInRound = highestDiagonal - lowestDiagonal + 1;
       for (let i = diagonalsDone; i < diagonalsInRound; i++) {
@@ -190,13 +183,10 @@ export default class Diff<
           return;
         }
 
-        // i counts diagonals in that order; map it to the diagonal number k.
-        let k;
-        if (i < diagonalsBelowFinal) {
-          k = lowestDiagonal + i;
-        } else {
-          k = highestDiagonal - (i - diagonalsBelowFinal);
-        }
+        // The i-th diagonal in that order.
+        const k = i < diagonalsBelowFinal
+          ? lowestDiagonal + i
+          : highestDiagonal - (i - diagonalsBelowFinal);
 
         let basePath;
         const removePath = bestPath[offset + k - 1],
@@ -204,8 +194,7 @@ export default class Diff<
 
         // Select the diagonal that we want to branch from. We select the prior
         // path whose position in the old string is the farthest from the origin.
-        // Neither move can leave the edit graph: a path that reaches an edge of
-        // it completes the diff within the same round.
+        // Neither can leave the edit graph: a path at its edge finishes that round.
         if (!removePath || (addPath && removePath.oldPos < addPath.oldPos)) {
           basePath = this.addToPath(addPath, true, false, 0, options);
         } else {
