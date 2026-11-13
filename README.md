@@ -3,7 +3,9 @@
 A JavaScript text differencing implementation. Try it out in the **[online demo](https://kpdecker.github.io/jsdiff)**.
 
 Based on the algorithm proposed in
-["An O(ND) Difference Algorithm and its Variations" (Myers, 1986)](http://www.xmailserver.org/diff2.pdf).
+["An O(ND) Difference Algorithm and its Variations" (Myers, 1986)](http://www.xmailserver.org/diff2.pdf),
+computed in the order described in
+["An O(NP) Sequence Comparison Algorithm" (Wu, Manber, Myers & Miller, 1990)](https://doi.org/10.1016/0020-0190(90)90035-V).
 
 ## Installation
 ```bash
@@ -463,7 +465,7 @@ See [LICENSE](https://github.com/kpdecker/jsdiff/blob/master/LICENSE).
 
 ## Deviations from the published Myers diff algorithm
 
-jsdiff deviates from the published algorithm in a couple of ways that don't affect results but do affect performance:
+jsdiff deviates from the published algorithm in a few ways that don't affect results but do affect performance:
 
 * jsdiff keeps track of the diff for each diagonal using a linked list of change objects for each diagonal, rather than the historical array of furthest-reaching D-paths on each diagonal contemplated on page 8 of Myers's paper.
-* jsdiff skips considering diagonals where the furthest-reaching D-path would go off the edge of the edit graph. This dramatically reduces the time cost (from quadratic to linear) in cases where the new text just appends or truncates content at the end of the old text.
+* Rather than one round per edit, jsdiff runs one round per edit that moves away from the final diagonal, as described by Wu, Manber, Myers & Miller, and only extends paths that can still finish within that round's edit length. It computes the same paths with the same tie-breaks, so the result is the same as Myers's algorithm, but it takes O((N+M)P) time instead of O((N+M)D), where P is the smaller of the number of insertions and deletions. Diffs that only insert or only delete, such as appending to or truncating the end of a text, finish in a single linear-time round.
